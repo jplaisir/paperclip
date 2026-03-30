@@ -1,0 +1,116 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: paperclip
+  namespace: paperclip
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: paperclip
+  template:
+    metadata:
+      labels:
+        app: paperclip
+    spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      initContainers:
+      - name: clone-and-build
+        image: node:20-alpine
+        securityContext:
+          runAsUser: 0
+        command:
+        - sh
+        - -c
+        - |
+          apk add --no-cache git
+          cd /app
+          git clone https://github.com/paperclipai/paperclip.git .
+          npm install -g pnpm@9.15.0
+          pnpm install
+          pnpm build
+          chown -R 1000:1000 /app
+        volumeMounts:
+        - name: app
+          mountPath: /app
+      containers:
+      - name: paperclip
+        image: node:20-alpine
+        workingDir: /app/server
+        command:
+        - sh
+        - -c
+        - |
+          cd /app/packages/shared && npx -y pnpm@9.15.0 build
+          cd /app/server
+          npx -y tsx src/index.ts
+        env:
+        - name: NODE_ENV
+          value: "production"
+        - name: PORT
+          value: "3100"
+        - name: PAPERCLIP_MIGRATION_PROMPT
+          value: "never"
+        - name: PAPERCLIP_MIGRATION_AUTO_APPLY
+          value: "true"
+        - name: DATA_DIR
+          value: "/data"
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: paperclip-db
+              key: DATABASE_URL
+        volumeMounts:
+        - name: data
+          mountPath: /data
+        - name: app
+          mountPath: /app
+        resources:
+          requests:
+            cpu: 500m
+            memory: 1Gi
+          limits:
+            cpu: 2000m
+            memory: 4Gi
+      - name: nginx-proxy
+        image: nginx:alpine
+        ports:
+        - containerPort: 8080
+          name: http
+        volumeMounts:
+        - name: nginx-config
+          mountPath: /etc/nginx/nginx.conf
+          subPath: nginx.conf
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 200m
+            memory: 256Mi
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 8080
+          initialDelaySeconds: 60
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 5
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: paperclip-data
+      - name: app
+        emptyDir: {}
+      - name: nginx-config
+        configMap:
+          name: paperclip-nginx-config
